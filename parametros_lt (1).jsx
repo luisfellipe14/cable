@@ -34,70 +34,87 @@ const cxCosh = (a) => {
 };
 const cxTanh = (a) => cxDiv(cxSinh(a), cxCosh(a));
 
-function calcParams(cable, L) {
-  const Vb = cable.voltage;
+// 2x2 complex matrix helpers (ABCD quadripole)
+const mat2Identity = () => [[cx(1, 0), cx(0, 0)], [cx(0, 0), cx(1, 0)]];
+const mat2Mul = (M1, M2) => [
+  [
+    cxAdd(cxMul(M1[0][0], M2[0][0]), cxMul(M1[0][1], M2[1][0])),
+    cxAdd(cxMul(M1[0][0], M2[0][1]), cxMul(M1[0][1], M2[1][1])),
+  ],
+  [
+    cxAdd(cxMul(M1[1][0], M2[0][0]), cxMul(M1[1][1], M2[1][0])),
+    cxAdd(cxMul(M1[1][0], M2[0][1]), cxMul(M1[1][1], M2[1][1])),
+  ],
+];
+
+const abcdSection = (R, X, B, L) => {
+  const z = cx(R, X);
+  const y = cx(0, B);
+  const Zc = cxSqrt(cxDiv(z, y));
+  const gamma = cxSqrt(cxMul(z, y));
+  const gL = cxMul(gamma, cx(L, 0));
+  const ch = cxCosh(gL);
+  const sh = cxSinh(gL);
+  const A = ch;
+  const Bq = cxMul(Zc, sh);
+  const C = cxMul(cxDiv(cx(1, 0), Zc), sh);
+  const D = ch;
+  return [[A, Bq], [C, D]];
+};
+
+function calcMultiParams(sections, voltage) {
+  const Vb = voltage;
   const Sb = 100;
   const Zb = (Vb * Vb) / Sb;
 
-  const calc = (R, X, B) => {
-    const z = cx(R, X);
-    const y = cx(0, B);
-    const Zc = cxSqrt(cxDiv(z, y));
-    const gamma = cxSqrt(cxMul(z, y));
-    const gL = cxMul(gamma, cx(L, 0));
-    const gL2 = cxMul(gamma, cx(L / 2, 0));
-    const Zstar = cxMul(Zc, cxSinh(gL));
-    const Yhalf = cxMul(cxDiv(cx(1, 0), Zc), cxTanh(gL2));
-    return {
-      R_pct: (Zstar.re / Zb) * 100,
-      X_pct: (Zstar.imag !== undefined ? Zstar.imag : Zstar.im) / Zb * 100,
-      B_mvar: 2 * Yhalf.im * Vb * Vb,
-      Zc,
-    };
+  let Mpos = mat2Identity();
+  let Mzero = mat2Identity();
+  let Ltotal = 0;
+  let Imin = Infinity;
+
+  for (const s of sections) {
+    const c = s.cable;
+    const L = s.length;
+    Ltotal += L;
+    if (c.current < Imin) Imin = c.current;
+    Mpos = mat2Mul(Mpos, abcdSection(c.Rp, c.Xp, c.Bp, L));
+    Mzero = mat2Mul(Mzero, abcdSection(c.R0, c.X0, c.B0, L));
+  }
+
+  const piFromAbcd = (M) => {
+    const A = M[0][0];
+    const Bq = M[0][1];
+    const C = M[1][0];
+    const Zser = Bq;
+    const Yshunt = cxDiv(cxSub(A, cx(1, 0)), Bq);
+    const Zc = cxSqrt(cxDiv(Bq, C));
+    return { Zser, Yshunt, Zc };
   };
 
-  const pos = calc(cable.Rp, cable.Xp, cable.Bp);
-  const zero = calc(cable.R0, cable.X0, cable.B0);
+  const p = piFromAbcd(Mpos);
+  const z = piFromAbcd(Mzero);
 
-  pos.X_pct = (pos.X_pct === undefined) ? 0 : pos.X_pct;
-  // fix: use .im
-  const posZ = cx(cable.Rp, cable.Xp);
-  const posY = cx(0, cable.Bp);
-  const posZc = cxSqrt(cxDiv(posZ, posY));
-  const posGamma = cxSqrt(cxMul(posZ, posY));
-  const posGL = cxMul(posGamma, cx(L, 0));
-  const posGL2 = cxMul(posGamma, cx(L / 2, 0));
-  const posZstar = cxMul(posZc, cxSinh(posGL));
-  const posYhalf = cxMul(cxDiv(cx(1, 0), posZc), cxTanh(posGL2));
-
-  const zeroZ = cx(cable.R0, cable.X0);
-  const zeroY = cx(0, cable.B0);
-  const zeroZc = cxSqrt(cxDiv(zeroZ, zeroY));
-  const zeroGamma = cxSqrt(cxMul(zeroZ, zeroY));
-  const zeroGL = cxMul(zeroGamma, cx(L, 0));
-  const zeroGL2 = cxMul(zeroGamma, cx(L / 2, 0));
-  const zeroZstar = cxMul(zeroZc, cxSinh(zeroGL));
-  const zeroYhalf = cxMul(cxDiv(cx(1, 0), zeroZc), cxTanh(zeroGL2));
-
-  const SIL = (Vb * Vb) / cxAbs(posZc);
-  const Ce = (Math.sqrt(3) * Vb * cable.current) / 1000;
+  const SIL = (Vb * Vb) / cxAbs(p.Zc);
+  const Ce = (Math.sqrt(3) * Vb * Imin) / 1000;
   const Cn = 0.8 * Ce;
 
   return {
     pos: {
-      R: (posZstar.re / Zb) * 100,
-      X: (posZstar.im / Zb) * 100,
-      B: 2 * posYhalf.im * Vb * Vb,
+      R: (p.Zser.re / Zb) * 100,
+      X: (p.Zser.im / Zb) * 100,
+      B: 2 * p.Yshunt.im * Vb * Vb,
     },
     zero: {
-      R: (zeroZstar.re / Zb) * 100,
-      X: (zeroZstar.im / Zb) * 100,
-      B: 2 * zeroYhalf.im * Vb * Vb,
+      R: (z.Zser.re / Zb) * 100,
+      X: (z.Zser.im / Zb) * 100,
+      B: 2 * z.Yshunt.im * Vb * Vb,
     },
     SIL,
     Cn,
     Ce,
     Zb,
+    Ltotal,
+    nSections: sections.length,
   };
 }
 
@@ -106,10 +123,11 @@ const fmt = (v, d = 4) => {
   return v.toLocaleString("pt-BR", { minimumFractionDigits: d, maximumFractionDigits: d });
 };
 
+const newSection = () => ({ id: `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, cableKey: "", distance: "" });
+
 export default function App() {
   const [voltage, setVoltage] = useState("");
-  const [cableKey, setCableKey] = useState("");
-  const [distance, setDistance] = useState("");
+  const [sections, setSections] = useState([newSection()]);
 
   const voltages = useMemo(() => {
     const vs = [...new Set(CABLE_DB.map((c) => c.voltage))].sort((a, b) => a - b);
@@ -133,24 +151,43 @@ export default function App() {
     return unique;
   }, [voltage]);
 
-  const selectedCable = useMemo(() => {
-    return cables.find((c) => c.key === cableKey) || null;
-  }, [cables, cableKey]);
+  const resolvedSections = useMemo(() => {
+    return sections.map((s) => {
+      const cable = cables.find((c) => c.key === s.cableKey) || null;
+      const length = parseFloat(s.distance);
+      return { ...s, cable, length: isFinite(length) ? length : 0 };
+    });
+  }, [sections, cables]);
+
+  const allSectionsReady = resolvedSections.length > 0 &&
+    resolvedSections.every((s) => s.cable && s.length > 0);
 
   const results = useMemo(() => {
-    const L = parseFloat(distance);
-    if (!selectedCable || !L || L <= 0) return null;
+    const v = parseFloat(voltage);
+    if (!v || !allSectionsReady) return null;
     try {
-      return calcParams(selectedCable, L);
+      return calcMultiParams(resolvedSections, v);
     } catch {
       return null;
     }
-  }, [selectedCable, distance]);
+  }, [voltage, resolvedSections, allSectionsReady]);
 
   const handleVoltageChange = (v) => {
     setVoltage(v);
-    setCableKey("");
+    setSections((prev) => prev.map((s) => ({ ...s, cableKey: "" })));
   };
+
+  const updateSection = useCallback((id, patch) => {
+    setSections((prev) => prev.map((s) => (s.id === id ? { ...s, ...patch } : s)));
+  }, []);
+
+  const addSection = useCallback(() => {
+    setSections((prev) => [...prev, newSection()]);
+  }, []);
+
+  const removeSection = useCallback((id) => {
+    setSections((prev) => (prev.length > 1 ? prev.filter((s) => s.id !== id) : prev));
+  }, []);
 
   return (
     <div style={{
@@ -193,131 +230,181 @@ export default function App() {
           <p style={{
             fontFamily: "'Inter', sans-serif", fontSize: 13, color: "#64748b",
             margin: "6px 0 0", fontWeight: 400,
-          }}>Modelo π corrigido — Parâmetros distribuídos com funções hiperbólicas</p>
+          }}>Modelo π corrigido — Parâmetros distribuídos com cascata ABCD multi-trecho</p>
         </div>
       </div>
 
       <div style={{ maxWidth: 1100, margin: "0 auto", padding: "28px 32px" }}>
-        {/* Input Section */}
-        <div style={{
-          display: "grid", gridTemplateColumns: "1fr 1fr 1fr",
-          gap: 20, marginBottom: 28,
-        }}>
-          {/* Voltage */}
-          <div>
-            <label style={{
-              fontFamily: "'Inter', sans-serif", fontSize: 11, fontWeight: 600,
-              color: "#94a3b8", letterSpacing: "0.08em", textTransform: "uppercase",
-              display: "block", marginBottom: 8,
-            }}>Tensão Nominal</label>
-            <select
-              value={voltage}
-              onChange={(e) => handleVoltageChange(e.target.value)}
-              style={{
-                width: "100%", padding: "12px 14px",
-                background: "rgba(15,23,42,0.8)", border: "1px solid rgba(59,130,246,0.2)",
-                borderRadius: 8, color: "#e2e8f0", fontSize: 14,
-                fontFamily: "'JetBrains Mono', monospace",
-                outline: "none", cursor: "pointer",
-                transition: "border-color 0.2s",
-              }}
-              onFocus={(e) => e.target.style.borderColor = "rgba(59,130,246,0.5)"}
-              onBlur={(e) => e.target.style.borderColor = "rgba(59,130,246,0.2)"}
-            >
-              <option value="">Selecionar tensão...</option>
-              {voltages.map((v) => (
-                <option key={v} value={v}>{v} kV</option>
-              ))}
-            </select>
-          </div>
+        {/* Voltage Selector */}
+        <div style={{ marginBottom: 20, maxWidth: 360 }}>
+          <label style={{
+            fontFamily: "'Inter', sans-serif", fontSize: 11, fontWeight: 600,
+            color: "#94a3b8", letterSpacing: "0.08em", textTransform: "uppercase",
+            display: "block", marginBottom: 8,
+          }}>Tensão Nominal</label>
+          <select
+            value={voltage}
+            onChange={(e) => handleVoltageChange(e.target.value)}
+            style={{
+              width: "100%", padding: "12px 14px",
+              background: "rgba(15,23,42,0.8)", border: "1px solid rgba(59,130,246,0.2)",
+              borderRadius: 8, color: "#e2e8f0", fontSize: 14,
+              fontFamily: "'JetBrains Mono', monospace",
+              outline: "none", cursor: "pointer",
+              transition: "border-color 0.2s",
+            }}
+            onFocus={(e) => e.target.style.borderColor = "rgba(59,130,246,0.5)"}
+            onBlur={(e) => e.target.style.borderColor = "rgba(59,130,246,0.2)"}
+          >
+            <option value="">Selecionar tensão...</option>
+            {voltages.map((v) => (
+              <option key={v} value={v}>{v} kV</option>
+            ))}
+          </select>
+        </div>
 
-          {/* Cable */}
-          <div>
+        {/* Sections (Trechos) */}
+        <div style={{ marginBottom: 24 }}>
+          <div style={{
+            display: "flex", alignItems: "center", justifyContent: "space-between",
+            marginBottom: 10,
+          }}>
             <label style={{
               fontFamily: "'Inter', sans-serif", fontSize: 11, fontWeight: 600,
               color: "#94a3b8", letterSpacing: "0.08em", textTransform: "uppercase",
-              display: "block", marginBottom: 8,
-            }}>Cabo Condutor</label>
-            <select
-              value={cableKey}
-              onChange={(e) => setCableKey(e.target.value)}
+            }}>Trechos da LT ({sections.length})</label>
+            <button
+              type="button"
+              onClick={addSection}
               disabled={!voltage}
               style={{
-                width: "100%", padding: "12px 14px",
-                background: voltage ? "rgba(15,23,42,0.8)" : "rgba(15,23,42,0.4)",
-                border: "1px solid rgba(59,130,246,0.2)",
-                borderRadius: 8, color: voltage ? "#e2e8f0" : "#475569", fontSize: 14,
-                fontFamily: "'JetBrains Mono', monospace",
-                outline: "none", cursor: voltage ? "pointer" : "not-allowed",
+                padding: "8px 14px",
+                background: voltage ? "rgba(59,130,246,0.12)" : "rgba(59,130,246,0.05)",
+                border: "1px solid rgba(59,130,246,0.3)",
+                borderRadius: 8, color: voltage ? "#3b82f6" : "#475569",
+                fontSize: 12, fontWeight: 600,
+                fontFamily: "'Inter', sans-serif",
+                cursor: voltage ? "pointer" : "not-allowed",
+                transition: "background 0.15s",
               }}
-            >
-              <option value="">Selecionar cabo...</option>
-              {cables.map((c) => (
-                <option key={c.key} value={c.key}>
-                  {c.cable_name} — {c.cable_mcm} MCM [{c.tower}/{c.circuit_type}]
-                </option>
-              ))}
-            </select>
+            >+ Adicionar trecho</button>
           </div>
 
-          {/* Distance */}
-          <div>
-            <label style={{
-              fontFamily: "'Inter', sans-serif", fontSize: 11, fontWeight: 600,
-              color: "#94a3b8", letterSpacing: "0.08em", textTransform: "uppercase",
-              display: "block", marginBottom: 8,
-            }}>Extensão da LT</label>
-            <div style={{ position: "relative" }}>
-              <input
-                type="number"
-                value={distance}
-                onChange={(e) => setDistance(e.target.value)}
-                placeholder="0"
-                min="0.1"
-                step="0.1"
-                style={{
-                  width: "100%", padding: "12px 50px 12px 14px",
-                  background: "rgba(15,23,42,0.8)", border: "1px solid rgba(59,130,246,0.2)",
-                  borderRadius: 8, color: "#e2e8f0", fontSize: 14,
+          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+            {sections.map((s, idx) => (
+              <div key={s.id} style={{
+                display: "grid",
+                gridTemplateColumns: "32px 1fr 160px 40px",
+                gap: 12, alignItems: "center",
+              }}>
+                <div style={{
+                  width: 32, height: 32, borderRadius: 8,
+                  background: "rgba(59,130,246,0.1)",
+                  border: "1px solid rgba(59,130,246,0.2)",
+                  display: "flex", alignItems: "center", justifyContent: "center",
                   fontFamily: "'JetBrains Mono', monospace",
-                  outline: "none", boxSizing: "border-box",
-                }}
-                onFocus={(e) => e.target.style.borderColor = "rgba(59,130,246,0.5)"}
-                onBlur={(e) => e.target.style.borderColor = "rgba(59,130,246,0.2)"}
-              />
-              <span style={{
-                position: "absolute", right: 14, top: "50%", transform: "translateY(-50%)",
-                color: "#64748b", fontSize: 13, fontWeight: 500,
-              }}>km</span>
-            </div>
+                  fontSize: 13, fontWeight: 600, color: "#3b82f6",
+                }}>{idx + 1}</div>
+
+                <select
+                  value={s.cableKey}
+                  onChange={(e) => updateSection(s.id, { cableKey: e.target.value })}
+                  disabled={!voltage}
+                  style={{
+                    width: "100%", padding: "12px 14px",
+                    background: voltage ? "rgba(15,23,42,0.8)" : "rgba(15,23,42,0.4)",
+                    border: "1px solid rgba(59,130,246,0.2)",
+                    borderRadius: 8, color: voltage ? "#e2e8f0" : "#475569", fontSize: 14,
+                    fontFamily: "'JetBrains Mono', monospace",
+                    outline: "none", cursor: voltage ? "pointer" : "not-allowed",
+                  }}
+                >
+                  <option value="">Selecionar cabo...</option>
+                  {cables.map((c) => (
+                    <option key={c.key} value={c.key}>
+                      {c.cable_name} — {c.cable_mcm} MCM [{c.tower}/{c.circuit_type}]
+                    </option>
+                  ))}
+                </select>
+
+                <div style={{ position: "relative" }}>
+                  <input
+                    type="number"
+                    value={s.distance}
+                    onChange={(e) => updateSection(s.id, { distance: e.target.value })}
+                    placeholder="0"
+                    min="0.1"
+                    step="0.1"
+                    style={{
+                      width: "100%", padding: "12px 50px 12px 14px",
+                      background: "rgba(15,23,42,0.8)", border: "1px solid rgba(59,130,246,0.2)",
+                      borderRadius: 8, color: "#e2e8f0", fontSize: 14,
+                      fontFamily: "'JetBrains Mono', monospace",
+                      outline: "none", boxSizing: "border-box",
+                    }}
+                    onFocus={(e) => e.target.style.borderColor = "rgba(59,130,246,0.5)"}
+                    onBlur={(e) => e.target.style.borderColor = "rgba(59,130,246,0.2)"}
+                  />
+                  <span style={{
+                    position: "absolute", right: 14, top: "50%", transform: "translateY(-50%)",
+                    color: "#64748b", fontSize: 13, fontWeight: 500,
+                  }}>km</span>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => removeSection(s.id)}
+                  disabled={sections.length === 1}
+                  title="Remover trecho"
+                  style={{
+                    width: 40, height: 40, borderRadius: 8,
+                    background: sections.length === 1 ? "rgba(239,68,68,0.04)" : "rgba(239,68,68,0.08)",
+                    border: "1px solid rgba(239,68,68,0.2)",
+                    color: sections.length === 1 ? "#475569" : "#ef4444",
+                    fontSize: 18, fontWeight: 600,
+                    cursor: sections.length === 1 ? "not-allowed" : "pointer",
+                    display: "flex", alignItems: "center", justifyContent: "center",
+                  }}
+                >×</button>
+              </div>
+            ))}
           </div>
         </div>
 
-        {/* Cable Info Bar */}
-        {selectedCable && (
-          <div style={{
-            background: "rgba(59,130,246,0.06)",
-            border: "1px solid rgba(59,130,246,0.12)",
-            borderRadius: 8, padding: "14px 20px", marginBottom: 24,
-            display: "flex", flexWrap: "wrap", gap: "12px 28px",
-          }}>
-            {[
-              ["R+", selectedCable.Rp, "Ω/km"],
-              ["X+", selectedCable.Xp, "Ω/km"],
-              ["B+", (selectedCable.Bp * 1e6).toFixed(4), "μS/km"],
-              ["R0", selectedCable.R0, "Ω/km"],
-              ["X0", selectedCable.X0, "Ω/km"],
-              ["B0", (selectedCable.B0 * 1e6).toFixed(4), "μS/km"],
-              ["I nom", selectedCable.current, "A"],
-            ].map(([label, val, unit]) => (
-              <div key={label} style={{ display: "flex", alignItems: "baseline", gap: 6 }}>
+        {/* Cable Info Bar — one row per resolved section */}
+        {resolvedSections.some((s) => s.cable) && (
+          <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 24 }}>
+            {resolvedSections.map((s, idx) => s.cable && (
+              <div key={s.id} style={{
+                background: "rgba(59,130,246,0.06)",
+                border: "1px solid rgba(59,130,246,0.12)",
+                borderRadius: 8, padding: "10px 16px",
+                display: "flex", flexWrap: "wrap", gap: "8px 22px", alignItems: "baseline",
+              }}>
                 <span style={{
-                  fontFamily: "'Inter', sans-serif", fontSize: 11, color: "#64748b", fontWeight: 500,
-                }}>{label}</span>
-                <span style={{ fontSize: 13, color: "#94a3b8", fontWeight: 500 }}>
-                  {typeof val === "number" ? val.toFixed(6) : val}
-                </span>
-                <span style={{ fontSize: 10, color: "#475569" }}>{unit}</span>
+                  fontFamily: "'Inter', sans-serif", fontSize: 11, fontWeight: 700,
+                  color: "#3b82f6", letterSpacing: "0.06em",
+                }}>#{idx + 1} {s.cable.cable_name}</span>
+                {[
+                  ["L", s.length, "km"],
+                  ["R+", s.cable.Rp, "Ω/km"],
+                  ["X+", s.cable.Xp, "Ω/km"],
+                  ["B+", (s.cable.Bp * 1e6).toFixed(4), "μS/km"],
+                  ["R0", s.cable.R0, "Ω/km"],
+                  ["X0", s.cable.X0, "Ω/km"],
+                  ["B0", (s.cable.B0 * 1e6).toFixed(4), "μS/km"],
+                  ["I nom", s.cable.current, "A"],
+                ].map(([label, val, unit]) => (
+                  <div key={label} style={{ display: "flex", alignItems: "baseline", gap: 5 }}>
+                    <span style={{
+                      fontFamily: "'Inter', sans-serif", fontSize: 10, color: "#64748b", fontWeight: 500,
+                    }}>{label}</span>
+                    <span style={{ fontSize: 12, color: "#94a3b8", fontWeight: 500 }}>
+                      {typeof val === "number" ? (Number.isInteger(val) ? val : val.toFixed(label === "L" ? 1 : 6)) : val}
+                    </span>
+                    <span style={{ fontSize: 10, color: "#475569" }}>{unit}</span>
+                  </div>
+                ))}
               </div>
             ))}
           </div>
@@ -346,7 +433,7 @@ export default function App() {
                 <span style={{
                   fontFamily: "'Inter', sans-serif", fontSize: 13, fontWeight: 700,
                   color: "#e2e8f0", letterSpacing: "-0.01em",
-                }}>Parâmetros Corrigidos — Base {fmt(results.Zb, 2)} Ω | {selectedCable.voltage} kV | {fmt(parseFloat(distance), 1)} km</span>
+                }}>Parâmetros Corrigidos — Base {fmt(results.Zb, 2)} Ω | {voltage} kV | {fmt(results.Ltotal, 1)} km{results.nSections > 1 ? ` (${results.nSections} trechos)` : ""}</span>
               </div>
               <table style={{ width: "100%", borderCollapse: "collapse" }}>
                 <thead>
@@ -452,7 +539,7 @@ export default function App() {
             </div>
           </div>
         ) : (
-          selectedCable && distance && parseFloat(distance) > 0 ? null : (
+          allSectionsReady ? null : (
             <div style={{
               textAlign: "center", padding: "60px 20px",
               color: "#475569",
@@ -467,11 +554,11 @@ export default function App() {
               <p style={{
                 fontFamily: "'Inter', sans-serif", fontSize: 14, fontWeight: 500,
                 margin: "0 0 6px",
-              }}>Selecione a tensão, o cabo e informe a extensão</p>
+              }}>Selecione a tensão e preencha cabo e extensão de cada trecho</p>
               <p style={{
                 fontFamily: "'Inter', sans-serif", fontSize: 12, fontWeight: 400,
                 color: "#334155",
-              }}>O cálculo utiliza o modelo π equivalente com parâmetros distribuídos</p>
+              }}>Os parâmetros equivalentes são obtidos cascateando as matrizes ABCD dos trechos</p>
             </div>
           )
         )}
@@ -484,7 +571,7 @@ export default function App() {
         }}>
           <span style={{
             fontFamily: "'Inter', sans-serif", fontSize: 10, color: "#334155",
-          }}>Base: Sb = 100 MVA | Zb = Vb²/Sb | Modelo π corrigido (senh/tanh)</span>
+          }}>Base: Sb = 100 MVA | Zb = Vb²/Sb | Modelo π corrigido — cascata ABCD por trecho</span>
           <span style={{
             fontFamily: "'Inter', sans-serif", fontSize: 10, color: "#334155",
           }}>627 configurações de cabo — 8 níveis de tensão</span>
